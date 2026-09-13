@@ -1,0 +1,23 @@
+{
+  "name": "jasa-payment-server",
+  "version": "1.0.0",
+  "description": "JASA V2 — Node.js backend: config API, Razorpay payments, Firebase Admin",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.19.2",
+    "firebase-admin": "12.2.0",
+    "razorpay": "2.9.2"
+  },
+  "devDependencies": {
+    "nodemon": "3.1.3"
+  }
+}

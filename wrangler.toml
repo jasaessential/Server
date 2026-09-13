@@ -1,0 +1,33 @@
+# ═══════════════════════════════════════════════
+# JASA V2 — Wrangler config for Cloudflare Workers
+#
+# This Node.js server is deployed as a Cloudflare
+# Worker using the nodejs_compat compatibility flag.
+#
+# Deploy:
+#   cd server
+#   npx wrangler deploy
+# ═══════════════════════════════════════════════
+
+name       = "jasa-payment-server"
+main       = "index.js"
+compatibility_date    = "2024-09-23"
+compatibility_flags   = ["nodejs_compat"]
+
+# ── Secrets (set via CLI, never in this file) ──────────────────
+# Run these once before deploying:
+#
+#   npx wrangler secret put FIREBASE_PROJECT_ID
+#   npx wrangler secret put FIREBASE_PRIVATE_KEY_ID
+#   npx wrangler secret put FIREBASE_PRIVATE_KEY
+#   npx wrangler secret put FIREBASE_CLIENT_EMAIL
+#   npx wrangler secret put FIREBASE_CLIENT_ID
+#   npx wrangler secret put RAZORPAY_KEY_ID
+#   npx wrangler secret put RAZORPAY_KEY_SECRET
+#   npx wrangler secret put RAZORPAY_WEBHOOK_SECRET
+#   npx wrangler secret put SERVER_SECRET
+#   npx wrangler secret put ALLOWED_ORIGINS
+
+# ── Non-secret env vars ────────────────────────────────────────
+[vars]
+PORT = "3001"
