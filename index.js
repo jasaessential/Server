@@ -9,6 +9,7 @@ const express      = require('express');
 const cors         = require('cors');
 const paymentRoute = require('./routes/payment');
 const configRoute  = require('./routes/config');
+const uploadRoute  = require('./routes/upload');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -21,7 +22,7 @@ const PORT = process.env.PORT || 3001;
    ─────────────────────────────────────────────── */
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
-    .map(o => o.trim())
+    .map(o => o.trim().replace(/\/+$/, ''))  // strip trailing slashes
     .filter(Boolean);
 
 const isDev = process.env.NODE_ENV !== 'production';
@@ -56,6 +57,7 @@ app.use(express.json());
 /* ── Routes ── */
 app.use('/api/payment', paymentRoute);
 app.use('/api/config',  configRoute);
+app.use('/api/upload',  uploadRoute);
 
 /* ── Health check ── */
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));

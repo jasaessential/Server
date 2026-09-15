@@ -27,6 +27,11 @@ compatibility_flags   = ["nodejs_compat"]
 #   npx wrangler secret put RAZORPAY_WEBHOOK_SECRET
 #   npx wrangler secret put SERVER_SECRET
 #   npx wrangler secret put ALLOWED_ORIGINS
+#   npx wrangler secret put R2_ACCOUNT_ID
+#   npx wrangler secret put R2_ACCESS_KEY_ID
+#   npx wrangler secret put R2_SECRET_ACCESS_KEY
+#   npx wrangler secret put R2_BUCKET_NAME
+#   npx wrangler secret put R2_PUBLIC_URL
 
 # ── Non-secret env vars ────────────────────────────────────────
 [vars]

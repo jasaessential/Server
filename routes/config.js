@@ -45,6 +45,10 @@ router.get('/public', (_req, res) => {
         razorpayKeyId: e.RAZORPAY_KEY_ID && !e.RAZORPAY_KEY_ID.includes('XXXX')
                         ? e.RAZORPAY_KEY_ID
                         : null,
+        r2: {
+            publicUrl:  e.R2_PUBLIC_URL   || '',
+            bucketName: e.R2_BUCKET_NAME  || '',
+        },
     });
 });
 
