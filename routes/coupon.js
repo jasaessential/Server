@@ -7,14 +7,16 @@
         (preview only — nothing is recorded).
 
    POST /api/coupon/redeem
-        Body: { code, groupOrderId, subtotal, orderType, shopIds? }
-        Re-validates inside a transaction, increments the
-        usage counters and writes a coupon_usages record.
-        Idempotent per (groupOrderId, code).
+        Body: { code, groupOrderId, subtotal, orderType, shopIds?, paymentMode? }
+        Re-validates inside a transaction and writes a coupon_usages record.
+        COD (default): counted immediately (status 'redeemed').
+        paymentMode 'online': status 'pending', NOT counted until the payment
+        is confirmed by /api/payment/verify or the Razorpay webhook
+        (see couponUsage.js). Idempotent per (groupOrderId, code).
 
    POST /api/coupon/release
         Body: { groupOrderId }
-        Reverses a redemption (payment failed / order cancelled).
+        Undoes a usage that never became a paid/placed order.
 
    Auth: Authorization: Bearer <Firebase ID token>
    ═══════════════════════════════════════════════ */
@@ -22,6 +24,9 @@
 
 const express = require('express');
 const { db, admin } = require('../firebase');
+const { releaseGroupCoupons } = require('../couponUsage');
+
+const PENDING_WINDOW_MS = 30 * 60 * 1000;
 
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
@@ -162,6 +167,19 @@ router.post('/redeem', async (req, res) => {
         const firstNeeded = (await couponRef.get()).data()?.firstOrderOnly;
         const first = firstNeeded ? await isFirstOrder(user.uid) : true;
 
+        /* online orders are only counted once payment is confirmed; until then the
+           usage is 'pending' and this user's other pending checkouts (last 30 min)
+           are treated as already used so a coupon can't be stacked before paying */
+        const online = req.body?.paymentMode === 'online';
+        let otherPending = 0;
+        if (online) {
+            const cutoff = Date.now() - PENDING_WINDOW_MS;
+            const pend = await db.collection('coupon_usages')
+                .where('userId', '==', user.uid).where('couponCode', '==', b.code).where('status', '==', 'pending').get();
+            otherPending = pend.docs.filter(d => d.data().groupOrderId !== b.groupOrderId
+                && (toDate(d.data().usedAt)?.getTime() || 0) > cutoff).length;
+        }
+
         const discount = await db.runTransaction(async tx => {
             const [cSnap, uSnap, usageSnap] = await Promise.all([tx.get(couponRef), tx.get(userRef), tx.get(usageRef)]);
             if (!cSnap.exists) fail('Invalid coupon code.');
@@ -169,22 +187,24 @@ router.post('/redeem', async (req, res) => {
             if (usageSnap.exists) {
                 const u = usageSnap.data();
                 if (u.userId !== user.uid) fail('Invalid order reference.');
-                if (u.status === 'redeemed') return u.discountAmount;   // idempotent retry
+                if (u.status === 'redeemed' || u.status === 'pending') return u.discountAmount;   // idempotent retry
             }
 
             const coupon = cSnap.data();
-            const usage  = { total: coupon.usedCount || 0, perUser: uSnap.exists ? (uSnap.data().count || 0) : 0 };
+            const usage  = { total: coupon.usedCount || 0, perUser: (uSnap.exists ? (uSnap.data().count || 0) : 0) + otherPending };
             const amount = evaluate(coupon, b, usage, first);
 
-            tx.update(couponRef, { usedCount: FieldValue.increment(1), updatedAt: FieldValue.serverTimestamp() });
-            tx.set(userRef, { couponCode: b.code, userId: user.uid, count: FieldValue.increment(1), lastUsedAt: FieldValue.serverTimestamp() }, { merge: true });
+            if (!online) {
+                tx.update(couponRef, { usedCount: FieldValue.increment(1), updatedAt: FieldValue.serverTimestamp() });
+                tx.set(userRef, { couponCode: b.code, userId: user.uid, count: FieldValue.increment(1), lastUsedAt: FieldValue.serverTimestamp() }, { merge: true });
+            }
             tx.set(usageRef, {
                 couponCode: b.code, couponName: coupon.name || b.code,
                 userId: user.uid, groupOrderId: b.groupOrderId,
                 orderType: b.orderType, shopIds: b.shopIds,
                 orderAmount: b.subtotal, discountAmount: amount,
                 discountType: coupon.type, discountValue: coupon.value,
-                status: 'redeemed', usedAt: FieldValue.serverTimestamp(),
+                status: online ? 'pending' : 'redeemed', usedAt: FieldValue.serverTimestamp(),
             });
             return amount;
         });
@@ -201,25 +221,16 @@ router.post('/release', async (req, res) => {
         const { groupOrderId } = req.body || {};
         if (!groupOrderId) fail('Missing order reference.');
 
-        const snap = await db.collection('coupon_usages')
-            .where('groupOrderId', '==', String(groupOrderId))
-            .where('userId', '==', user.uid).get();
+        /* A client may only undo a redemption that never became an order:
+           - once payment succeeded nothing can be released
+           - a counted ('redeemed') usage can be released only if no order exists for it */
+        const gid  = String(groupOrderId);
+        const paid = (await db.collection('payments').where('groupOrderId', '==', gid)
+            .where('userId', '==', user.uid).get()).docs.some(p => p.data().status === 'paid');
+        const hasOrder = !(await db.collection('orders').where('groupOrderId', '==', gid)
+            .where('userId', '==', user.uid).limit(1).get()).empty;
 
-        let released = 0;
-        for (const d of snap.docs) {
-            const u = d.data();
-            if (u.status !== 'redeemed') continue;
-            const couponRef = db.collection('coupons').doc(u.couponCode);
-            const userRef   = db.collection('coupon_user_usage').doc(`${u.couponCode}__${user.uid}`);
-            await db.runTransaction(async tx => {
-                const fresh = await tx.get(d.ref);
-                if (fresh.data().status !== 'redeemed') return;
-                tx.update(couponRef, { usedCount: FieldValue.increment(-1) });
-                tx.set(userRef, { count: FieldValue.increment(-1) }, { merge: true });
-                tx.update(d.ref, { status: 'released', releasedAt: FieldValue.serverTimestamp() });
-            });
-            released++;
-        }
+        const released = paid ? 0 : await releaseGroupCoupons(gid, user.uid, { allowRedeemed: !hasOrder });
         res.json({ released });
     } catch (err) { sendError(res, err); }
 });

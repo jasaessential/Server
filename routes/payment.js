@@ -11,6 +11,7 @@ const express   = require('express');
 const crypto    = require('crypto');
 const { getRazorpay } = require('../razorpay');
 const { db, admin } = require('../firebase');
+const { confirmGroupCoupons, releaseGroupCoupons } = require('../couponUsage');
 
 const router = express.Router();
 
@@ -76,7 +77,7 @@ async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount 
     if (discount > 0) {
         const uSnap = await db.collection('coupon_usages').doc(`${groupOrderId}__${couponCode}`).get();
         const u = uSnap.exists ? uSnap.data() : null;
-        if (!u || u.status !== 'redeemed' || (!trusted && u.userId !== uid)) return 'Coupon was not redeemed for this order.';
+        if (!u || (u.status !== 'redeemed' && u.status !== 'pending') || (!trusted && u.userId !== uid)) return 'Coupon was not redeemed for this order.';
         if (Math.abs(u.discountAmount - discount) > 0.05) return 'Coupon discount does not match.';
     }
 
@@ -320,6 +321,10 @@ router.post('/verify', async (req, res) => {
 
         await batch.commit();
 
+        /* Payment is confirmed → this is the moment a coupon use is counted */
+        try { await confirmGroupCoupons(payData.groupOrderId); }
+        catch (e) { console.error('[verify] coupon confirm failed:', e.message); }
+
         return res.json({ success: true, paymentId: razorpay_payment_id });
 
     } catch (err) {
@@ -419,6 +424,8 @@ async function handlePaymentCaptured(payment) {
     }
 
     await batch.commit();
+    try { await confirmGroupCoupons(payData.groupOrderId); }
+    catch (e) { console.error('[webhook] coupon confirm failed:', e.message); }
     console.log(`[webhook] payment.captured processed: ${rzpPaymentId}`);
 }
 
@@ -447,6 +454,8 @@ async function handlePaymentFailed(payment) {
     }
 
     await batch.commit();
+    try { await releaseGroupCoupons(payData.groupOrderId, null, { allowRedeemed: false }); }
+    catch (e) { console.error('[webhook] coupon release failed:', e.message); }
     console.log(`[webhook] payment.failed processed: ${rzpOrderId}`);
 }
 
