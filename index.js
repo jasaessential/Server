@@ -10,6 +10,7 @@ const cors         = require('cors');
 const paymentRoute = require('./routes/payment');
 const configRoute  = require('./routes/config');
 const uploadRoute  = require('./routes/upload');
+const couponRoute  = require('./routes/coupon');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -58,6 +59,7 @@ app.use(express.json());
 app.use('/api/payment', paymentRoute);
 app.use('/api/config',  configRoute);
 app.use('/api/upload',  uploadRoute);
+app.use('/api/coupon',  couponRoute);
 
 /* ── Health check ── */
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));

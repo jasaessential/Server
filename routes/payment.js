@@ -35,6 +35,64 @@ async function verifyUser(req, res) {
 }
 
 /* ─────────────────────────────────────────────
+   HELPER — recompute what the customer owes from the
+   order docs already in Firestore, so the charged amount
+   is never taken on the client's word alone.
+
+   Checks (returns an error string, or null when OK):
+   • every order exists, belongs to the caller and to this group
+   • no order is already paid
+   • subtotal − discount + delivery === totalAmount per order
+   • any discount is backed by a server-written coupon_usages
+     record (see routes/coupon.js) for this user + group
+   • the requested amount equals the full total, or the
+     configured online deposit of it
+   ───────────────────────────────────────────── */
+async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount }) {
+    const snaps = await db.getAll(...orderIds.map(id => db.collection('orders').doc(String(id))));
+
+    let total = 0, discount = 0, couponCode = null;
+    for (const s of snaps) {
+        if (!s.exists) return 'Order not found.';
+        const o = s.data();
+        if (!trusted && o.userId !== uid) return 'Order does not belong to you.';
+        if (o.groupOrderId !== groupOrderId) return 'Order does not match this checkout.';
+        if (o.paymentStatus === 'paid' || o.paymentStatus === 'partial_paid') return 'Order is already paid.';
+
+        const sub = Number(o.subtotal) || 0;
+        const fee = Number(o.deliveryFee) || 0;
+        const dis = Number(o.discountAmount) || 0;
+        const tot = Number(o.totalAmount) || 0;
+        if (dis < 0 || Math.abs(sub - dis + fee - tot) > 0.01) return 'Order total does not add up.';
+
+        if (dis > 0) {
+            if (!o.couponCode || (couponCode && couponCode !== o.couponCode)) return 'Invalid coupon on order.';
+            couponCode = o.couponCode;
+        }
+        total    += tot;
+        discount += dis;
+    }
+
+    if (discount > 0) {
+        const uSnap = await db.collection('coupon_usages').doc(`${groupOrderId}__${couponCode}`).get();
+        const u = uSnap.exists ? uSnap.data() : null;
+        if (!u || u.status !== 'redeemed' || (!trusted && u.userId !== uid)) return 'Coupon was not redeemed for this order.';
+        if (Math.abs(u.discountAmount - discount) > 0.05) return 'Coupon discount does not match.';
+    }
+
+    const cfg = await db.collection('config').doc('payment').get();
+    const pct = Number(cfg.exists && cfg.data().onlineDepositPercent) || 30;
+    const deposit = Math.ceil(total * pct / 100);
+    const a = Number(amount);
+    const isFull    = Math.abs(a - total) <= 0.01;
+    const isDeposit = Math.abs(a - deposit) <= 1.01;
+    if (!isFull && !isDeposit) {
+        return `Amount mismatch — expected ₹${total.toFixed(2)} (or ${pct}% deposit ₹${deposit}).`;
+    }
+    return null;
+}
+
+/* ─────────────────────────────────────────────
    GET /api/payment/key
    Returns Razorpay key_id (safe to expose).
    Returns null if Razorpay not yet configured.
@@ -61,10 +119,12 @@ router.get('/key', (_req, res) => {
 router.post('/create-order', async (req, res) => {
     /* 1. Auth — accept Firebase ID token OR a server-side secret for trusted calls */
     let uid = null;
+    let trusted = false;
     const serverSecret = req.headers['x-server-secret'];
     if (serverSecret && serverSecret === process.env.SERVER_SECRET) {
         // Trusted server-to-server call: uid comes from body
         uid = req.body.userId || 'server';
+        trusted = true;
     } else {
         const user = await verifyUser(req, res);
         if (!user) return;
@@ -104,6 +164,14 @@ router.post('/create-order', async (req, res) => {
 
 
     try {
+        const amountError = await verifyOrderAmount({
+            uid, trusted, groupOrderId, orderIds: [...new Set(orderIds)], amount,
+        });
+        if (amountError) {
+            console.warn('[create-order] rejected:', amountError, { uid, groupOrderId, amount });
+            return res.status(400).json({ error: amountError });
+        }
+
         const safeStr = (str) => String(str || '').replace(/[^\x20-\x7E]/g, '').substring(0, 40);
         const cleanNotes = {
             groupOrderId: safeStr(groupOrderId || 'unknown'),

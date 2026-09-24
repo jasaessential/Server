@@ -69,7 +69,7 @@ router.post('/admin-token', async (req, res) => {
         const data  = snap.data();
         const roles = data.roles || (data.role ? [data.role] : []);
 
-        if (!roles.includes('admin')) {
+        if (!roles.includes('admin') && !roles.includes('manage_items')) {
             return res.status(403).json({ error: 'Access denied. Admin role required.' });
         }
 
