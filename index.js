@@ -11,6 +11,8 @@ const paymentRoute = require('./routes/payment');
 const configRoute  = require('./routes/config');
 const uploadRoute  = require('./routes/upload');
 const couponRoute  = require('./routes/coupon');
+const walletRoute  = require('./routes/wallet');
+const referralRoute = require('./routes/referral');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -60,6 +62,8 @@ app.use('/api/payment', paymentRoute);
 app.use('/api/config',  configRoute);
 app.use('/api/upload',  uploadRoute);
 app.use('/api/coupon',  couponRoute);
+app.use('/api/wallet',  walletRoute);
+app.use('/api/referral', referralRoute);
 
 /* ── Health check ── */
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));

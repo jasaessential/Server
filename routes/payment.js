@@ -12,6 +12,7 @@ const crypto    = require('crypto');
 const { getRazorpay } = require('../razorpay');
 const { db, admin } = require('../firebase');
 const { confirmGroupCoupons, releaseGroupCoupons } = require('../couponUsage');
+const { confirmGroupWallet, releaseGroupWallet } = require('../walletCore');
 
 const router = express.Router();
 
@@ -43,16 +44,17 @@ async function verifyUser(req, res) {
    Checks (returns an error string, or null when OK):
    • every order exists, belongs to the caller and to this group
    • no order is already paid
-   • subtotal − discount + delivery === totalAmount per order
+   • subtotal − discount − wallet + delivery === totalAmount per order
    • any discount is backed by a server-written coupon_usages
      record (see routes/coupon.js) for this user + group
+   • any wallet amount is backed by a wallet_usages hold (routes/wallet.js)
    • the requested amount equals the full total, or the
      configured online deposit of it
    ───────────────────────────────────────────── */
 async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount }) {
     const snaps = await db.getAll(...orderIds.map(id => db.collection('orders').doc(String(id))));
 
-    let total = 0, discount = 0, couponCode = null;
+    let total = 0, discount = 0, wallet = 0, couponCode = null;
     for (const s of snaps) {
         if (!s.exists) return 'Order not found.';
         const o = s.data();
@@ -63,8 +65,9 @@ async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount 
         const sub = Number(o.subtotal) || 0;
         const fee = Number(o.deliveryFee) || 0;
         const dis = Number(o.discountAmount) || 0;
+        const wal = Number(o.walletAmount) || 0;
         const tot = Number(o.totalAmount) || 0;
-        if (dis < 0 || Math.abs(sub - dis + fee - tot) > 0.01) return 'Order total does not add up.';
+        if (dis < 0 || wal < 0 || Math.abs(sub - dis - wal + fee - tot) > 0.01) return 'Order total does not add up.';
 
         if (dis > 0) {
             if (!o.couponCode || (couponCode && couponCode !== o.couponCode)) return 'Invalid coupon on order.';
@@ -72,6 +75,7 @@ async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount 
         }
         total    += tot;
         discount += dis;
+        wallet   += wal;
     }
 
     if (discount > 0) {
@@ -79,6 +83,13 @@ async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount 
         const u = uSnap.exists ? uSnap.data() : null;
         if (!u || (u.status !== 'redeemed' && u.status !== 'pending') || (!trusted && u.userId !== uid)) return 'Coupon was not redeemed for this order.';
         if (Math.abs(u.discountAmount - discount) > 0.05) return 'Coupon discount does not match.';
+    }
+
+    if (wallet > 0) {
+        const wSnap = await db.collection('wallet_usages').doc(String(groupOrderId)).get();
+        const w = wSnap.exists ? wSnap.data() : null;
+        if (!w || (w.status !== 'redeemed' && w.status !== 'pending') || (!trusted && w.userId !== uid)) return 'Wallet was not reserved for this order.';
+        if (Math.abs(w.amount - wallet) > 0.05) return 'Wallet amount does not match.';
     }
 
     const cfg = await db.collection('config').doc('payment').get();
@@ -324,6 +335,8 @@ router.post('/verify', async (req, res) => {
         /* Payment is confirmed → this is the moment a coupon use is counted */
         try { await confirmGroupCoupons(payData.groupOrderId); }
         catch (e) { console.error('[verify] coupon confirm failed:', e.message); }
+        try { await confirmGroupWallet(payData.groupOrderId); }
+        catch (e) { console.error('[verify] wallet confirm failed:', e.message); }
 
         return res.json({ success: true, paymentId: razorpay_payment_id });
 
@@ -426,6 +439,8 @@ async function handlePaymentCaptured(payment) {
     await batch.commit();
     try { await confirmGroupCoupons(payData.groupOrderId); }
     catch (e) { console.error('[webhook] coupon confirm failed:', e.message); }
+    try { await confirmGroupWallet(payData.groupOrderId); }
+    catch (e) { console.error('[webhook] wallet confirm failed:', e.message); }
     console.log(`[webhook] payment.captured processed: ${rzpPaymentId}`);
 }
 
@@ -456,6 +471,8 @@ async function handlePaymentFailed(payment) {
     await batch.commit();
     try { await releaseGroupCoupons(payData.groupOrderId, null, { allowRedeemed: false }); }
     catch (e) { console.error('[webhook] coupon release failed:', e.message); }
+    try { await releaseGroupWallet(payData.groupOrderId, null, { allowRedeemed: false }); }
+    catch (e) { console.error('[webhook] wallet release failed:', e.message); }
     console.log(`[webhook] payment.failed processed: ${rzpOrderId}`);
 }
 
