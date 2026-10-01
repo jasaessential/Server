@@ -20,8 +20,9 @@
         Lists all objects (up to 1000) under the prefix.
         Returns: { objects: [{ key, url, size, lastModified }] }
 
-   Auth: All three endpoints require x-server-secret header
-         matching ADMIN_SECRET_KEY env var.
+   Auth: All three endpoints require the x-server-secret header to hold the
+         Firebase ID token of a user with the admin or manage_items role
+         (env-config.js getAdminToken). No shared key is accepted.
    ═══════════════════════════════════════════════ */
 'use strict';
 
@@ -34,6 +35,8 @@ const {
     DeleteObjectCommand,
     ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
+
+const { verifyIdToken, getDb } = require('../firebase');
 
 const router = express.Router();
 
@@ -68,14 +71,21 @@ const upload = multer({
 });
 
 /* ── Auth middleware ───────────────────────────── */
-function requireSecret(req, res, next) {
-    const secret = process.env.ADMIN_SECRET_KEY;
-    if (!secret) return res.status(503).json({ error: 'Server not configured.' });
-    const provided = req.headers['x-server-secret'];
-    if (!provided || provided !== secret) {
-        return res.status(403).json({ error: 'Forbidden.' });
+async function requireSecret(req, res, next) {
+    const idToken = req.headers['x-server-secret'];
+    if (!idToken) return res.status(403).json({ error: 'Forbidden.' });
+    try {
+        const { uid } = await verifyIdToken(idToken);
+        const snap  = await getDb().collection('users').doc(uid).get();
+        const d     = snap.exists ? snap.data() : {};
+        const roles = d.roles || [d.role || 'user'];
+        if (!roles.includes('admin') && !roles.includes('manage_items')) {
+            return res.status(403).json({ error: 'Admin access required.' });
+        }
+        next();
+    } catch (_) {
+        return res.status(403).json({ error: 'Session expired. Please sign in again.' });
     }
-    next();
 }
 
 /* ── MIME → extension map ──────────────────────── */

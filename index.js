@@ -13,6 +13,7 @@ const uploadRoute  = require('./routes/upload');
 const couponRoute  = require('./routes/coupon');
 const walletRoute  = require('./routes/wallet');
 const referralRoute = require('./routes/referral');
+const ordersRoute   = require('./routes/orders');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -64,6 +65,7 @@ app.use('/api/upload',  uploadRoute);
 app.use('/api/coupon',  couponRoute);
 app.use('/api/wallet',  walletRoute);
 app.use('/api/referral', referralRoute);
+app.use('/api/orders',  ordersRoute);
 
 /* ── Health check ── */
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
@@ -87,5 +89,15 @@ app.listen(PORT, () => {
     console.log(`Mode: ${isDev ? 'development (all localhost origins allowed)' : 'production'}`);
     console.log(`Allowed origins: ${allowedOrigins.join(', ') || '(none listed)'}`);
 });
+
+/* Settle wallet cashback / refunds / stale holds and abandoned checkouts every
+   15 min while awake. The Worker cron also calls /api/wallet/settle-all, which
+   covers the time Render spends asleep. Set DISABLE_SETTLE_TIMER=1 to turn it off (e.g. local dev). */
+if (process.env.DISABLE_SETTLE_TIMER !== '1') {
+    const { settleAll } = require('./settle');
+    const run = () => settleAll().catch(e => console.error('[settle] failed:', e.message));
+    setTimeout(run, 60 * 1000);
+    setInterval(run, 15 * 60 * 1000);
+}
 
 module.exports = app;

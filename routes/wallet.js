@@ -28,6 +28,8 @@ const { db } = require('../firebase');
 const { verifyUser, verifyAdmin, sendError, fail } = require('../authHelpers');
 const W = require('../walletCore');
 const { processReferral } = require('../referralCore');
+const { getQuote } = require('./orders');
+const { settleAll } = require('../settle');
 
 const router = express.Router();
 
@@ -35,10 +37,20 @@ router.post('/redeem', async (req, res) => {
     const user = await verifyUser(req, res);
     if (!user) return;
     try {
-        const { groupOrderId, orderTotal, orderType, paymentMode } = req.body || {};
+        const { groupOrderId, paymentMode } = req.body || {};
+
+        /* Order total = server-priced quote − the coupon discount recorded for this checkout */
+        const quote = await getQuote(groupOrderId, user.uid);
+        if (!quote) fail('Please refresh the page and try again.');
+        const coupons = await db.collection('coupon_usages')
+            .where('groupOrderId', '==', String(groupOrderId)).where('userId', '==', user.uid).get();
+        const discount = coupons.docs.map(d => d.data())
+            .filter(u => u.status === 'redeemed' || u.status === 'pending')
+            .reduce((s, u) => s + (Number(u.discountAmount) || 0), 0);
+
         const amount = await W.holdWallet(user.uid, {
-            groupOrderId, orderTotal, orderType: orderType === 'xerox' ? 'xerox' : 'product',
-            online: paymentMode === 'online',
+            groupOrderId, orderTotal: W.round2(quote.subtotal + quote.deliveryFee - discount),
+            orderType: quote.type, online: paymentMode === 'online',
         });
         res.json({ redeemed: true, amount });
     } catch (err) { sendError(res, err, 'wallet/redeem'); }
@@ -81,6 +93,14 @@ router.post('/sync', async (req, res) => {
             cashback, refunded, staleReleased, referral,
         });
     } catch (err) { sendError(res, err, 'wallet/sync'); }
+});
+
+/* Scheduled settle for all customers — called by the Cloudflare Worker cron (see settle.js) */
+router.post('/settle-all', async (req, res) => {
+    const secret = process.env.SERVER_SECRET;
+    if (!secret || req.headers['x-server-secret'] !== secret) return res.status(401).json({ error: 'Unauthorized' });
+    try { res.json(await settleAll()); }
+    catch (err) { sendError(res, err, 'wallet/settle-all'); }
 });
 
 router.post('/admin/adjust', async (req, res) => {

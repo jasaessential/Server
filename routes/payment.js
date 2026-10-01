@@ -48,31 +48,36 @@ async function verifyUser(req, res) {
    • any discount is backed by a server-written coupon_usages
      record (see routes/coupon.js) for this user + group
    • any wallet amount is backed by a wallet_usages hold (routes/wallet.js)
-   • the requested amount equals the full total, or the
-     configured online deposit of it
+   • the requested amount equals the full total, or — only in
+     'partial_online' mode — the configured online deposit of it
+
+   Returns { error } or { kind: 'full' | 'deposit', orderTotals }.
    ───────────────────────────────────────────── */
 async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount }) {
     const snaps = await db.getAll(...orderIds.map(id => db.collection('orders').doc(String(id))));
+    const fail  = error => ({ error });
 
     let total = 0, discount = 0, wallet = 0, couponCode = null;
+    const orderTotals = {};
     for (const s of snaps) {
-        if (!s.exists) return 'Order not found.';
+        if (!s.exists) return fail('Order not found.');
         const o = s.data();
-        if (!trusted && o.userId !== uid) return 'Order does not belong to you.';
-        if (o.groupOrderId !== groupOrderId) return 'Order does not match this checkout.';
-        if (o.paymentStatus === 'paid' || o.paymentStatus === 'partial_paid') return 'Order is already paid.';
+        if (!trusted && o.userId !== uid) return fail('Order does not belong to you.');
+        if (o.groupOrderId !== groupOrderId) return fail('Order does not match this checkout.');
+        if (o.paymentStatus === 'paid' || o.paymentStatus === 'partial_paid') return fail('Order is already paid.');
 
         const sub = Number(o.subtotal) || 0;
         const fee = Number(o.deliveryFee) || 0;
         const dis = Number(o.discountAmount) || 0;
         const wal = Number(o.walletAmount) || 0;
         const tot = Number(o.totalAmount) || 0;
-        if (dis < 0 || wal < 0 || Math.abs(sub - dis - wal + fee - tot) > 0.01) return 'Order total does not add up.';
+        if (dis < 0 || wal < 0 || Math.abs(sub - dis - wal + fee - tot) > 0.01) return fail('Order total does not add up.');
 
         if (dis > 0) {
-            if (!o.couponCode || (couponCode && couponCode !== o.couponCode)) return 'Invalid coupon on order.';
+            if (!o.couponCode || (couponCode && couponCode !== o.couponCode)) return fail('Invalid coupon on order.');
             couponCode = o.couponCode;
         }
+        orderTotals[s.id] = tot;
         total    += tot;
         discount += dis;
         wallet   += wal;
@@ -81,27 +86,97 @@ async function verifyOrderAmount({ uid, trusted, groupOrderId, orderIds, amount 
     if (discount > 0) {
         const uSnap = await db.collection('coupon_usages').doc(`${groupOrderId}__${couponCode}`).get();
         const u = uSnap.exists ? uSnap.data() : null;
-        if (!u || (u.status !== 'redeemed' && u.status !== 'pending') || (!trusted && u.userId !== uid)) return 'Coupon was not redeemed for this order.';
-        if (Math.abs(u.discountAmount - discount) > 0.05) return 'Coupon discount does not match.';
+        if (!u || (u.status !== 'redeemed' && u.status !== 'pending') || (!trusted && u.userId !== uid)) return fail('Coupon was not redeemed for this order.');
+        if (Math.abs(u.discountAmount - discount) > 0.05) return fail('Coupon discount does not match.');
     }
 
     if (wallet > 0) {
         const wSnap = await db.collection('wallet_usages').doc(String(groupOrderId)).get();
         const w = wSnap.exists ? wSnap.data() : null;
-        if (!w || (w.status !== 'redeemed' && w.status !== 'pending') || (!trusted && w.userId !== uid)) return 'Wallet was not reserved for this order.';
-        if (Math.abs(w.amount - wallet) > 0.05) return 'Wallet amount does not match.';
+        if (!w || (w.status !== 'redeemed' && w.status !== 'pending') || (!trusted && w.userId !== uid)) return fail('Wallet was not reserved for this order.');
+        if (Math.abs(w.amount - wallet) > 0.05) return fail('Wallet amount does not match.');
     }
 
-    const cfg = await db.collection('config').doc('payment').get();
-    const pct = Number(cfg.exists && cfg.data().onlineDepositPercent) || 30;
+    const cfgSnap = await db.collection('config').doc('payment').get();
+    const cfg     = cfgSnap.exists ? cfgSnap.data() : {};
+    const pct     = Number(cfg.onlineDepositPercent) || 30;
     const deposit = Math.ceil(total * pct / 100);
     const a = Number(amount);
-    const isFull    = Math.abs(a - total) <= 0.01;
-    const isDeposit = Math.abs(a - deposit) <= 1.01;
-    if (!isFull && !isDeposit) {
-        return `Amount mismatch — expected ₹${total.toFixed(2)} (or ${pct}% deposit ₹${deposit}).`;
+    if (Math.abs(a - total) <= 0.01) return { kind: 'full', orderTotals };
+    if (Math.abs(a - deposit) <= 1.01) {
+        if ((cfg.mode || 'both') !== 'partial_online') return fail('A deposit payment is not allowed right now. Please pay the full amount.');
+        return { kind: 'deposit', orderTotals };
     }
-    return null;
+    return fail(`Amount mismatch — expected ₹${total.toFixed(2)}${cfg.mode === 'partial_online' ? ` (or ${pct}% deposit ₹${deposit})` : ''}.`);
+}
+
+/* ─────────────────────────────────────────────
+   HELPER — what each order of a paid checkout records.
+   A deposit is split across the group's orders in proportion to their
+   totals (the last order takes the rounding remainder).
+   ───────────────────────────────────────────── */
+function paidShares(payData, paidINR) {
+    const totals = payData.orderTotals || {};
+    const ids    = payData.firestoreOrderIds || [];
+    const sum    = ids.reduce((s, id) => s + (Number(totals[id]) || 0), 0);
+    const r2     = n => Math.round(n * 100) / 100;
+    const full   = payData.kind !== 'deposit';
+    let left = paidINR;
+    return ids.map((id, i) => {
+        const tot  = Number(totals[id]) || 0;
+        const paid = full ? tot
+            : i === ids.length - 1 ? r2(left)
+            : r2(sum > 0 ? paidINR * tot / sum : paidINR / ids.length);
+        left -= paid;
+        return {
+            id,
+            paymentStatus: full ? 'paid' : 'partial_paid',
+            amountPaid:    paid,
+            balanceDue:    full ? 0 : Math.max(0, r2(tot - paid)),
+        };
+    });
+}
+
+/* Mark a checkout paid on its payment record, orders and order_status docs.
+   Shared by /verify and the payment.captured webhook.                      */
+async function markGroupPaid(payData, rzpOrderId, { paymentId, amountPaise, method, signature, webhook }) {
+    const FV    = admin.firestore.FieldValue;
+    if (!payData.orderTotals) {
+        /* Payment created before kind/orderTotals were recorded — read them from the orders */
+        const ids   = payData.firestoreOrderIds || [];
+        const snaps = ids.length ? await db.getAll(...ids.map(id => db.collection('orders').doc(String(id)))) : [];
+        const orderTotals = {};
+        snaps.forEach(s => { orderTotals[s.id] = Number(s.exists && s.data().totalAmount) || 0; });
+        const sum = Object.values(orderTotals).reduce((a, b) => a + b, 0);
+        payData = { ...payData, orderTotals,
+                    kind: (Number(amountPaise) || 0) / 100 < sum - 0.01 ? 'deposit' : 'full' };
+    }
+    const batch = db.batch();
+    batch.update(db.collection('payments').doc(rzpOrderId), {
+        razorpayPaymentId: paymentId,
+        ...(signature ? { razorpaySignature: signature } : {}),
+        status:            'paid',
+        paidAmountPaise:   amountPaise,
+        paidAt:            FV.serverTimestamp(),
+        updatedAt:         FV.serverTimestamp(),
+        method:            method || 'unknown',
+        ...(webhook ? { webhookProcessed: true } : {}),
+    });
+    for (const s of paidShares(payData, (Number(amountPaise) || payData.amountPaise) / 100)) {
+        batch.set(db.collection('orders').doc(s.id), {
+            paymentStatus:     s.paymentStatus,
+            amountPaid:        s.amountPaid,
+            balanceDue:        s.balanceDue,
+            razorpayPaymentId: paymentId,
+            paidAt:            FV.serverTimestamp(),
+            updatedAt:         FV.serverTimestamp(),
+        }, { merge: true });
+        batch.set(db.collection('order_status').doc(s.id), {
+            paymentStatus: s.paymentStatus,
+            updatedAt:     FV.serverTimestamp(),
+        }, { merge: true });
+    }
+    await batch.commit();
 }
 
 /* ─────────────────────────────────────────────
@@ -176,12 +251,12 @@ router.post('/create-order', async (req, res) => {
 
 
     try {
-        const amountError = await verifyOrderAmount({
+        const check = await verifyOrderAmount({
             uid, trusted, groupOrderId, orderIds: [...new Set(orderIds)], amount,
         });
-        if (amountError) {
-            console.warn('[create-order] rejected:', amountError, { uid, groupOrderId, amount });
-            return res.status(400).json({ error: amountError });
+        if (check.error) {
+            console.warn('[create-order] rejected:', check.error, { uid, groupOrderId, amount });
+            return res.status(400).json({ error: check.error });
         }
 
         const safeStr = (str) => String(str || '').replace(/[^\x20-\x7E]/g, '').substring(0, 40);
@@ -213,6 +288,8 @@ router.post('/create-order', async (req, res) => {
             userEmail,
             amountINR:         Number(amount),
             amountPaise,
+            kind:              check.kind,          // 'full' | 'deposit'
+            orderTotals:       check.orderTotals,   // per order, to split a deposit
             currency:          'INR',
             status:            'created',      // created → paid / failed
             createdAt:         admin.firestore.FieldValue.serverTimestamp(),
@@ -224,7 +301,7 @@ router.post('/create-order', async (req, res) => {
             batch.set(db.collection('orders').doc(ordId), {
                 razorpayOrderId: rzpOrder.id,
                 paymentStatus:   'pending',
-                paymentMethod:   'razorpay',
+                paymentMethod:   check.kind === 'deposit' ? 'partial' : 'razorpay',
                 updatedAt:       admin.firestore.FieldValue.serverTimestamp(),
             }, { merge: true });
         }
@@ -301,36 +378,17 @@ router.post('/verify', async (req, res) => {
 
         /* 4. Fetch payment details from Razorpay to get the actual amount */
         const rzpPayment = await getRazorpay().payments.fetch(razorpay_payment_id);
-
-        const batch = db.batch();
-
-        /* 5. Update payment doc */
-        batch.update(db.collection('payments').doc(razorpay_order_id), {
-            razorpayPaymentId: razorpay_payment_id,
-            razorpaySignature: razorpay_signature,
-            status:            'paid',
-            paidAmountPaise:   rzpPayment.amount,
-            paidAt:            admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt:         admin.firestore.FieldValue.serverTimestamp(),
-            method:            rzpPayment.method || 'unknown',
-        });
-
-        /* 6. Update every linked order in Firestore */
-        for (const ordId of (payData.firestoreOrderIds || [])) {
-            batch.set(db.collection('orders').doc(ordId), {
-                paymentStatus:     'paid',
-                razorpayPaymentId: razorpay_payment_id,
-                paidAt:            admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt:         admin.firestore.FieldValue.serverTimestamp(),
-            }, { merge: true });
-            /* Also update order_status collection */
-            batch.set(db.collection('order_status').doc(ordId), {
-                paymentStatus: 'paid',
-                updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
-            }, { merge: true });
+        if (rzpPayment.order_id !== razorpay_order_id) {
+            return res.status(400).json({ error: 'Payment does not belong to this order' });
         }
 
-        await batch.commit();
+        /* 5. Payment record + every linked order (paid or partial_paid, amountPaid, balanceDue) */
+        if (payData.status !== 'paid') {
+            await markGroupPaid(payData, razorpay_order_id, {
+                paymentId: razorpay_payment_id, amountPaise: rzpPayment.amount,
+                method: rzpPayment.method, signature: razorpay_signature,
+            });
+        }
 
         /* Payment is confirmed → this is the moment a coupon use is counted */
         try { await confirmGroupCoupons(payData.groupOrderId); }
@@ -411,32 +469,9 @@ async function handlePaymentCaptured(payment) {
     // Skip if already marked paid (verify endpoint may have beaten webhook)
     if (payData.status === 'paid') return;
 
-    const batch = db.batch();
-
-    batch.update(db.collection('payments').doc(rzpOrderId), {
-        razorpayPaymentId: rzpPaymentId,
-        status:            'paid',
-        paidAmountPaise:   payment.amount,
-        paidAt:            admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt:         admin.firestore.FieldValue.serverTimestamp(),
-        method:            payment.method || 'unknown',
-        webhookProcessed:  true,
+    await markGroupPaid(payData, rzpOrderId, {
+        paymentId: rzpPaymentId, amountPaise: payment.amount, method: payment.method, webhook: true,
     });
-
-    for (const ordId of (payData.firestoreOrderIds || [])) {
-        batch.set(db.collection('orders').doc(ordId), {
-            paymentStatus:     'paid',
-            razorpayPaymentId: rzpPaymentId,
-            paidAt:            admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt:         admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
-        batch.set(db.collection('order_status').doc(ordId), {
-            paymentStatus: 'paid',
-            updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
-    }
-
-    await batch.commit();
     try { await confirmGroupCoupons(payData.groupOrderId); }
     catch (e) { console.error('[webhook] coupon confirm failed:', e.message); }
     try { await confirmGroupWallet(payData.groupOrderId); }

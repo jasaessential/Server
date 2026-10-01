@@ -7,15 +7,10 @@
         key_id only — never the secret).
         This is what env-config.js fetches at boot.
 
-   POST /api/config/admin-token
-        Verifies a Firebase ID token and returns
-        the ADMIN_SECRET_KEY only if the user has
-        the 'admin' role in their Firestore profile.
    ═══════════════════════════════════════════════ */
 'use strict';
 
 const express        = require('express');
-const { verifyIdToken, getDb } = require('../firebase');
 
 const router = express.Router();
 
@@ -52,40 +47,8 @@ router.get('/public', (_req, res) => {
     });
 });
 
-/* ── POST /api/config/admin-token ────────────── */
-router.post('/admin-token', async (req, res) => {
-    const { idToken } = req.body || {};
-    if (!idToken) return res.status(400).json({ error: 'idToken required.' });
-
-    try {
-        // 1. Verify Firebase ID token
-        const decoded = await verifyIdToken(idToken);
-
-        // 2. Check admin role in Firestore users/{uid}
-        const db   = getDb();
-        const snap = await db.collection('users').doc(decoded.uid).get();
-        if (!snap.exists) return res.status(403).json({ error: 'User not found.' });
-
-        const data  = snap.data();
-        const roles = data.roles || (data.role ? [data.role] : []);
-
-        if (!roles.includes('admin') && !roles.includes('manage_items')) {
-            return res.status(403).json({ error: 'Access denied. Admin role required.' });
-        }
-
-        // 3. Return ADMIN_SECRET_KEY — never logs this value
-        const adminKey = process.env.ADMIN_SECRET_KEY;
-        if (!adminKey) return res.status(503).json({ error: 'Admin key not configured.' });
-
-        return res.json({
-            token:     adminKey,
-            expiresIn: 3600,   // hint to the client to re-fetch after 1 hour
-        });
-
-    } catch (err) {
-        console.error('[admin-token]', err.message);
-        return res.status(401).json({ error: 'Token verification failed.' });
-    }
-});
+/* POST /api/config/admin-token was removed: it handed the shared ADMIN_SECRET_KEY
+   to admin browsers. Admin calls now carry the user's Firebase ID token, checked by
+   the Worker (verifyAdmin) and routes/upload.js.                                  */
 
 module.exports = router;

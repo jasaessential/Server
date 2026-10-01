@@ -25,6 +25,7 @@
 const express = require('express');
 const { db, admin } = require('../firebase');
 const { releaseGroupCoupons } = require('../couponUsage');
+const { getQuote } = require('./orders');
 
 const PENDING_WINDOW_MS = 30 * 60 * 1000;
 
@@ -160,6 +161,13 @@ router.post('/redeem', async (req, res) => {
         const b = parseBody(req);
         if (!b.groupOrderId) fail('Missing order reference.');
 
+        /* The amounts come from the server-priced quote for this checkout, not the browser */
+        const quote = await getQuote(b.groupOrderId, user.uid);
+        if (!quote) fail('Please refresh the page and try again.');
+        b.subtotal  = quote.subtotal;
+        b.orderType = quote.type;
+        b.shopIds   = Object.keys(quote.groups || {});
+
         const couponRef = db.collection('coupons').doc(b.code);
         const userRef   = db.collection('coupon_user_usage').doc(`${b.code}__${user.uid}`);
         const usageRef  = db.collection('coupon_usages').doc(`${b.groupOrderId}__${b.code}`);
@@ -171,14 +179,16 @@ router.post('/redeem', async (req, res) => {
            usage is 'pending' and this user's other pending checkouts (last 30 min)
            are treated as already used so a coupon can't be stacked before paying */
         const online = req.body?.paymentMode === 'online';
-        let otherPending = 0;
-        if (online) {
-            const cutoff = Date.now() - PENDING_WINDOW_MS;
-            const pend = await db.collection('coupon_usages')
-                .where('userId', '==', user.uid).where('couponCode', '==', b.code).where('status', '==', 'pending').get();
-            otherPending = pend.docs.filter(d => d.data().groupOrderId !== b.groupOrderId
-                && (toDate(d.data().usedAt)?.getTime() || 0) > cutoff).length;
-        }
+        /* Unpaid online uses from the last 30 min count as used — both for this
+           user's limit and for the coupon's total limit — so a coupon can't be
+           stacked across several checkouts before any of them is paid. */
+        const cutoff = Date.now() - PENDING_WINDOW_MS;
+        const pend = (await db.collection('coupon_usages')
+            .where('couponCode', '==', b.code).where('status', '==', 'pending').get())
+            .docs.map(d => d.data())
+            .filter(u => u.groupOrderId !== b.groupOrderId && (toDate(u.usedAt)?.getTime() || 0) > cutoff);
+        const otherPending    = pend.filter(u => u.userId === user.uid).length;
+        const allOtherPending = pend.length;
 
         const discount = await db.runTransaction(async tx => {
             const [cSnap, uSnap, usageSnap] = await Promise.all([tx.get(couponRef), tx.get(userRef), tx.get(usageRef)]);
@@ -191,7 +201,8 @@ router.post('/redeem', async (req, res) => {
             }
 
             const coupon = cSnap.data();
-            const usage  = { total: coupon.usedCount || 0, perUser: (uSnap.exists ? (uSnap.data().count || 0) : 0) + otherPending };
+            const usage  = { total: (coupon.usedCount || 0) + allOtherPending,
+                             perUser: (uSnap.exists ? (uSnap.data().count || 0) : 0) + otherPending };
             const amount = evaluate(coupon, b, usage, first);
 
             if (!online) {

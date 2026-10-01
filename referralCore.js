@@ -9,8 +9,8 @@
      users/{uid}.referredBy        uid of whoever referred them
 
    Rewards are paid into the wallet (walletCore.postTxn):
-     trigger 'signup'      → both sides are paid as soon as the code is applied (fixed amounts only)
-     trigger 'first_order' → paid when the referee's first qualifying order is Delivered
+     paid when the referee's first qualifying order is Delivered (trigger 'first_order').
+     The old 'signup' trigger is no longer honoured — see normaliseConfig().
    ═══════════════════════════════════════════════ */
 'use strict';
 
@@ -43,7 +43,10 @@ function normaliseConfig(raw = {}) {
     const c = { ...DEFAULT_CFG, ...raw };
     return {
         enabled:             c.enabled === true,
-        trigger:             c.trigger === 'signup' ? 'signup' : 'first_order',
+        /* 'signup' (pay as soon as a code is applied) could be farmed with throwaway
+           accounts, so rewards are always paid on the friend's first delivered order —
+           whatever an older saved config says. */
+        trigger:             'first_order',
         referrerRewardType:  rewardType(c.referrerRewardType),
         referrerRewardValue: Math.max(0, num(c.referrerRewardValue)),
         referrerMaxReward:   Math.max(0, num(c.referrerMaxReward)),

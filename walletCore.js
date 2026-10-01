@@ -264,9 +264,20 @@ async function settleOrders(uid, orders, cfg) {
     return { cashback: round2(cashback), refunded: round2(refunded) };
 }
 
+/* The status used for money (cashback, refunds, referral rewards) comes from
+   order_status/{id}: customers can only create it as Pending, after which only
+   staff move it. The status on the order doc itself is a fallback for old
+   orders that have no order_status doc.                                       */
 async function loadUserOrders(uid) {
     const snap = await db.collection('orders').where('userId', '==', uid).get();
-    return snap.docs.map(d => ({ ref: d.ref, data: d.data() }));
+    if (snap.empty) return [];
+    const statusSnaps = await db.getAll(...snap.docs.map(d => db.collection('order_status').doc(d.id)));
+    return snap.docs.map((d, i) => {
+        const data = d.data();
+        const s = statusSnaps[i];
+        if (s.exists && s.data().status) data.status = s.data().status;
+        return { ref: d.ref, data };
+    });
 }
 
 module.exports = {
