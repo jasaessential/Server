@@ -20,17 +20,25 @@ const r2  = n => Math.round(n * 100) / 100;
 /* ── Products ─────────────────────────────────── */
 
 /** Selling price of an item doc — same rule as the storefront (item-details.js). */
-function productPrice(item) {
-    const o = num(item.priceOriginal ?? item.price);
-    const d = num(item.priceDiscount ?? item.sellingPrice);
+function productPrice(item, size) {
+    const sp = size && item.sizePrices && item.sizePrices[size];
+    const o = num(sp ? sp.priceOriginal : (item.priceOriginal ?? item.price));
+    const d = num(sp ? sp.priceDiscount : (item.priceDiscount ?? item.sellingPrice));
     return d > 0 && (o <= 0 || d < o) ? d : o;
+}
+
+/** Cart line id of a sized item is "<itemId>__<size>" (item ids never contain "__"). */
+function splitLineId(id) {
+    const s = String(id || '_'), i = s.indexOf('__');
+    return i < 0 ? { baseId: s, size: '' } : { baseId: s.slice(0, i), size: s.slice(i + 2) };
 }
 
 /** Re-prices the cart lines of one shop. Lines keep their display fields; price,
     originalPrice, discountPercent and name come from items/{id}.            */
 async function priceProductGroup(lines) {
     if (!Array.isArray(lines) || !lines.length || lines.length > 100) fail('Your cart is empty or too large.');
-    const snaps = await db.getAll(...lines.map(l => db.collection('items').doc(String(l?.id || '_'))));
+    const parts = lines.map(l => splitLineId(l?.id));
+    const snaps = await db.getAll(...parts.map(p => db.collection('items').doc(p.baseId)));
     let subtotal = 0;
     const items = lines.map((line, i) => {
         const s = snaps[i];
@@ -38,13 +46,16 @@ async function priceProductGroup(lines) {
         const it  = s.data();
         const qty = Math.floor(num(line.qty));
         if (qty < 1 || qty > 999) fail(`Invalid quantity for "${it.name || line.name}".`);
-        const price    = productPrice(it);
+        const size = parts[i].size;
+        if (size && !(it.sizePrices && it.sizePrices[size])) fail(`"${it.name || line.name}" is no longer available in size ${size}.`);
+        const price    = productPrice(it, size);
         if (!(price > 0)) fail(`"${it.name || line.name}" cannot be ordered right now.`);
-        const original = num(it.priceOriginal ?? it.price) || price;
+        const sp       = size ? it.sizePrices[size] : null;
+        const original = num(sp ? sp.priceOriginal : (it.priceOriginal ?? it.price)) || price;
         subtotal += price * qty;
         return {
             ...line,
-            id: s.id, qty,
+            id: size ? `${s.id}__${size}` : s.id, qty,
             name:            it.name || line.name || '',
             price,
             originalPrice:   original,
