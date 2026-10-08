@@ -32,7 +32,9 @@ async function sb(path, init = {}) {
     if (!sbUrl() || !key) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured');
     const res = await fetch(`${sbUrl()}/storage/v1${path}`, {
         ...init,
-        headers: { Authorization: `Bearer ${key}`, apikey: key, 'Content-Type': 'application/json', ...(init.headers || {}) },
+        // New-style keys (sb_secret_…) go in `apikey` only; legacy service_role JWTs also as Bearer
+        headers: { ...(key.startsWith('sb_') ? {} : { Authorization: `Bearer ${key}` }), apikey: key,
+                   'Content-Type': 'application/json', ...(init.headers || {}) },
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(`Supabase ${res.status}: ${body.message || body.error || 'request failed'}`);
