@@ -14,6 +14,7 @@ const couponRoute  = require('./routes/coupon');
 const walletRoute  = require('./routes/wallet');
 const referralRoute = require('./routes/referral');
 const ordersRoute   = require('./routes/orders');
+const filesRoute    = require('./routes/files').router;
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -47,7 +48,7 @@ app.use(cors({
 
         cb(new Error(`CORS: origin ${origin} not allowed`));
     },
-    methods:      ['GET', 'POST', 'OPTIONS'],
+    methods:      ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-server-secret'],
     credentials:  true,
 }));
@@ -66,9 +67,13 @@ app.use('/api/coupon',  couponRoute);
 app.use('/api/wallet',  walletRoute);
 app.use('/api/referral', referralRoute);
 app.use('/api/orders',  ordersRoute);
+app.use('/api/files',   filesRoute);
 
 /* ── Health check ── */
-app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
+app.get('/health', (_req, res) => res.json({
+    status: 'ok', ts: Date.now(),
+    files: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),   // customer uploads configured
+}));
 
 /* ── 404 ── */
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -79,7 +84,7 @@ app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
    ─────────────────────────────────────────────── */
 app.use((err, req, res, _next) => {
     const origin = req.headers.origin || '';
-    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    if (allowedOrigins.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
     console.error('[Server Error]', err.message);
     res.status(500).json({ error: err.message || 'Internal server error' });
 });

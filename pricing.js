@@ -13,6 +13,7 @@
 
 const { db } = require('./firebase');
 const { fail } = require('./authHelpers');
+const { pathFromUrl } = require('./routes/files');
 
 const num = v => Number(v) || 0;
 const r2  = n => Math.round(n * 100) / 100;
@@ -27,10 +28,11 @@ function productPrice(item, size) {
     return d > 0 && (o <= 0 || d < o) ? d : o;
 }
 
-/** Cart line id of a sized item is "<itemId>__<size>" (item ids never contain "__"). */
+/** Cart line id of a sized item is "<itemId>__<size>" (item ids never contain "__").
+    A customer-photo poster adds "__<tag>" so each upload is its own line.   */
 function splitLineId(id) {
-    const s = String(id || '_'), i = s.indexOf('__');
-    return i < 0 ? { baseId: s, size: '' } : { baseId: s.slice(0, i), size: s.slice(i + 2) };
+    const [baseId, size = '', ...rest] = String(id || '_').split('__');
+    return { baseId, size, tag: rest.join('__').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) };
 }
 
 /** Re-prices the cart lines of one shop. Lines keep their display fields; price,
@@ -52,11 +54,21 @@ async function priceProductGroup(lines) {
         if (!(price > 0)) fail(`"${it.name || line.name}" cannot be ordered right now.`);
         const sp       = size ? it.sizePrices[size] : null;
         const original = num(sp ? sp.priceOriginal : (it.priceOriginal ?? it.price)) || price;
+        /* Customer-photo poster: the line must carry the uploaded photo */
+        const custom = {};
+        if (it.customUpload) {
+            const photo = String(line.customPhoto || '');
+            if (photo.length > 600 || !pathFromUrl(photo)?.startsWith('poster-uploads/')) fail(`Please upload your photo for "${it.name || line.name}".`);
+            custom.customPhoto = photo;
+            custom.customNote  = String(line.customNote || '').trim().slice(0, 300);
+        }
+        const { customPhoto: _p, customNote: _n, ...rest } = line;
+        const tag = size && parts[i].tag ? `__${parts[i].tag}` : '';
         subtotal += price * qty;
         return {
-            ...line,
-            id: size ? `${s.id}__${size}` : s.id, qty,
-            name:            it.name || line.name || '',
+            ...rest, ...custom,
+            id: size ? `${s.id}__${size}${tag}` : s.id, qty,
+            name:            (size ? `${it.name || line.name || ''} (${size})` : (it.name || line.name || '')),
             price,
             originalPrice:   original,
             discountPercent: original > price ? Math.round((original - price) / original * 100) : 0,

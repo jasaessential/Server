@@ -3,9 +3,12 @@
 
    GET  /api/config/public
         Returns all client-safe config (Firebase,
-        Cloudinary, Supabase, Worker URL, Razorpay
+        Cloudinary, Worker URL, Razorpay
         key_id only — never the secret).
         This is what env-config.js fetches at boot.
+
+        No Supabase key is sent: customer files go through
+        /api/files (routes/files.js) with signed URLs.
 
    ═══════════════════════════════════════════════ */
 'use strict';
@@ -31,10 +34,6 @@ router.get('/public', (_req, res) => {
             cloudName:    e.CLOUDINARY_CLOUD_NAME    || '',
             uploadPreset: e.CLOUDINARY_UPLOAD_PRESET || '',
             apiKey:       e.CLOUDINARY_API_KEY       || '',
-        },
-        supabase: {
-            url:     e.SUPABASE_URL      || '',
-            anonKey: e.SUPABASE_ANON_KEY || '',
         },
         workerUrl:     e.WORKER_URL        || '',
         razorpayKeyId: e.RAZORPAY_KEY_ID && !e.RAZORPAY_KEY_ID.includes('XXXX')

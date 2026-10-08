@@ -20,6 +20,7 @@ const express = require('express');
 const { db, admin } = require('../firebase');
 const { verifyUser, sendError, fail } = require('../authHelpers');
 const P = require('../pricing');
+const { pathFromUrl } = require('./files');
 
 const router = express.Router();
 const r2 = n => Math.round(n * 100) / 100;
@@ -149,7 +150,12 @@ router.post('/attach-file', async (req, res) => {
         const { orderId, index, uploadStatus, uploadedUrl } = req.body || {};
         if (!['uploaded', 'whatsapp'].includes(uploadStatus)) fail('Invalid upload status.');
         const url = uploadStatus === 'whatsapp' ? 'pending_whatsapp' : String(uploadedUrl || '');
-        if (uploadStatus === 'uploaded' && (!/^https:\/\/[^\s]+$/.test(url) || url.length > 1000)) fail('Invalid file link.');
+        if (uploadStatus === 'uploaded') {
+            // Only files this customer uploaded through /api/files/upload-url
+            const p = pathFromUrl(url);
+            const oid = String(orderId || '');
+            if (url.length > 1000 || !p || !(p.startsWith(`xerox-orders/${oid}/`) || p.startsWith(`xerox-uploads/${user.uid}/`))) fail('Invalid file link.');
+        }
 
         const ref = db.collection('orders').doc(String(orderId || '_'));
         await db.runTransaction(async tx => {
