@@ -45,9 +45,12 @@ const encPath   = p => p.split('/').map(encodeURIComponent).join('/');
 const cleanName = n => String(n || 'file').replace(/[^a-zA-Z0-9.\-_]/g, '_').slice(-120) || 'file';
 const safeId    = s => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
 
-/** The object path inside "files" for any link we ever stored (public / sign / bare). */
+/** Object path inside "files" for a link into the CURRENT project (SUPABASE_URL);
+    null for anything else, including links into the old project. */
 function pathFromUrl(url) {
-    const m = String(url || '').match(/\/storage\/v1\/object\/(?:public\/|sign\/|authenticated\/)?files\/([^?#]+)/);
+    const u = String(url || '');
+    if (u.startsWith('http') && !u.startsWith(`${sbUrl()}/`)) return null;
+    const m = u.match(/\/storage\/v1\/object\/(?:public\/|sign\/|authenticated\/)?files\/([^?#]+)/);
     if (!m) return null;
     const p = decodeURIComponent(m[1]);
     return p.split('/').some(seg => !seg || seg === '..' || seg === '.') ? null : p;
@@ -74,14 +77,18 @@ async function canReadOrder(uid, order) {
     return (sd.owners || []).includes(uid) || (sd.employees || []).includes(uid);
 }
 
-/** Paths of every file attached to an order (xerox documents and custom poster photos). */
-function orderFilePaths(order) {
-    const links = [
+/** Every file link on an order (xerox documents and custom poster photos). */
+function orderFileLinks(order) {
+    return new Set([
         ...(order.documents || []).map(d => d?.uploadedUrl),
         ...(order.items || []).map(i => i?.customPhoto),
-    ];
-    return new Set(links.map(pathFromUrl).filter(Boolean));
+    ].filter(Boolean));
 }
+
+/* Orders placed before 2026-10-08 link to the old Supabase project (public
+   bucket, not ours to sign). Those links are returned as-is, after the same
+   permission check. */
+const LEGACY_FILE_URL = /^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\/files\/[^\s"'<>]+$/;
 
 router.post('/upload-url', async (req, res) => {
     const user = await verifyUser(req, res);
@@ -115,12 +122,13 @@ router.post('/view-url', async (req, res) => {
             if (!(await rolesOf(user.uid)).includes('admin')) fail('File not found.');
             path = pathFromUrl(`/storage/v1/object/files/${rawPath}`);
         } else {
-            path = pathFromUrl(url);
             const id = safeId(orderId);
-            const snap = path && id && await db.collection('orders').doc(id).get();
+            const snap = url && id && await db.collection('orders').doc(id).get();
             if (!snap || !snap.exists) fail('File not found.');
             const order = snap.data();
-            if (!orderFilePaths(order).has(path) || !(await canReadOrder(user.uid, order))) fail('File not found.');
+            if (!orderFileLinks(order).has(url) || !(await canReadOrder(user.uid, order))) fail('File not found.');
+            path = pathFromUrl(url);
+            if (!path && LEGACY_FILE_URL.test(url)) return res.json({ url });
         }
         if (!path) fail('File not found.');
 
