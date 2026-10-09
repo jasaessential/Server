@@ -82,6 +82,7 @@ function orderFileLinks(order) {
     return new Set([
         ...(order.documents || []).map(d => d?.uploadedUrl),
         ...(order.items || []).map(i => i?.customPhoto),
+        ...(order.items || []).map(i => i?.customPreview),
     ].filter(Boolean));
 }
 

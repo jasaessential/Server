@@ -35,14 +35,79 @@ function splitLineId(id) {
     return { baseId, size, tag: rest.join('__').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) };
 }
 
+/* ── Customize-your-own wall poster ───────────────
+   Not an items/ doc: size, GSM and prices come from poster_config/main (set in
+   manage-posters.html). Cart line id: "custom-poster__<size>__g<gsm>-<tag>". */
+const CUSTOM_POSTER_ID = 'custom-poster';
+
+async function loadPosterConfig() {
+    const s = await db.collection('poster_config').doc('main').get();
+    return s.exists ? s.data() : {};
+}
+
+/** Price of one custom poster from the config; null when the size / GSM is not offered. */
+function customPosterPrice(cfg, size, gsm) {
+    const sz = (cfg.sizes || []).find(x => x && x.name === size && x.enabled !== false && num(x.priceOriginal) > 0);
+    const g  = (cfg.gsmOptions || []).find(x => x && num(x.gsm) === gsm);
+    if (!sz || !g) return null;
+    const extra = num(g.extra);
+    const o = num(sz.priceOriginal) + extra;
+    const d = num(sz.priceDiscount) > 0 ? num(sz.priceDiscount) + extra : 0;
+    return { original: o, price: d > 0 && d < o ? d : o, widthIn: num(sz.widthIn), heightIn: num(sz.heightIn) };
+}
+
+function priceCustomPosterLine(line, part, cfg) {
+    const gsm = Number((part.tag.match(/^g(\d{2,4})-/) || [])[1]);
+    const p   = customPosterPrice(cfg, part.size, gsm);
+    if (!p) fail(`The custom poster size ${part.size || ''} / ${gsm || '?'} GSM is no longer available. Please remove it from your cart.`);
+    const qty = Math.floor(num(line.qty));
+    if (qty < 1 || qty > 99) fail('Invalid quantity for the custom poster.');
+    const original = String(line.customPhoto || ''), fitted = String(line.customPreview || '');
+    for (const u of [original, fitted]) {
+        if (u.length > 600 || !pathFromUrl(u)?.startsWith('poster-uploads/')) fail('Please upload your poster picture again.');
+    }
+    const { customPhoto: _a, customPreview: _b, customNote: _c, customLayout: _d, img: _i, ...rest } = line;
+    return {
+        item: {
+            ...rest,
+            id: `${CUSTOM_POSTER_ID}__${part.size}__${part.tag}`, qty,
+            name: `Custom Poster (${part.size}, ${gsm} GSM)`,
+            gsm, customPoster: true,
+            customPhoto: original, customPreview: fitted,
+            customNote: String(line.customNote || '').trim().slice(0, 300),
+            customLayout: sanitizeLayout(line.customLayout),
+            price: p.price, originalPrice: p.original,
+            discountPercent: p.original > p.price ? Math.round((p.original - p.price) / p.original * 100) : 0,
+        },
+        total: p.price * qty,
+    };
+}
+
+/** How the customer fitted the picture (for the shop's reference only). */
+function sanitizeLayout(l) {
+    l = l && typeof l === 'object' ? l : {};
+    const n = (v, lo, hi) => Math.min(hi, Math.max(lo, Number(v) || 0));
+    return { rotate: n(l.rotate, -360, 360), zoom: n(l.zoom, 0, 20), x: n(l.x, -5, 5), y: n(l.y, -5, 5), landscape: !!l.landscape };
+}
+
 /** Re-prices the cart lines of one shop. Lines keep their display fields; price,
     originalPrice, discountPercent and name come from items/{id}.            */
 async function priceProductGroup(lines) {
     if (!Array.isArray(lines) || !lines.length || lines.length > 100) fail('Your cart is empty or too large.');
     const parts = lines.map(l => splitLineId(l?.id));
-    const snaps = await db.getAll(...parts.map(p => db.collection('items').doc(p.baseId)));
+    const isCustom = parts.map(p => p.baseId === CUSTOM_POSTER_ID);
+    const regular  = parts.filter((_, i) => !isCustom[i]);
+    const regSnaps = regular.length ? await db.getAll(...regular.map(p => db.collection('items').doc(p.baseId))) : [];
+    const posterCfg = isCustom.includes(true) ? await loadPosterConfig() : null;
+    let k = 0;
+    const snaps = isCustom.map(c => c ? null : regSnaps[k++]);
     let subtotal = 0;
     const items = lines.map((line, i) => {
+        if (isCustom[i]) {
+            const { item, total } = priceCustomPosterLine(line, parts[i], posterCfg);
+            subtotal += total;
+            return item;
+        }
         const s = snaps[i];
         if (!s.exists) fail(`"${line?.name || 'An item'}" is no longer available. Please remove it from your cart.`);
         const it  = s.data();
