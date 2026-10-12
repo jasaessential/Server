@@ -10,6 +10,8 @@
    POST /api/files/view-url    { orderId, url }   or (admin)  { path }
         → { url }  signed for 15 min. Allowed for the order's customer, admins,
           and sellers / employees of the order's shop (same as firestore.rules).
+   POST /api/files/view-urls   { orderId, urls: [...] }
+        → { urls: { [storedLink]: signedUrl } }   same check, one call per order page.
    GET  /api/files/list?prefix=     (admin)  → { files: [{ name, fullPath, created_at, metadata }] }
    POST /api/files/delete  { paths } (admin) → { deleted }
 
@@ -112,31 +114,65 @@ router.post('/upload-url', async (req, res) => {
     } catch (err) { sendError(res, err, 'files/upload-url'); }
 });
 
+/** Signed links for some of an order's file links, after the order read check.
+    → { [storedLink]: openableUrl }; links that aren't on the order are left out. */
+async function signOrderLinks(uid, orderId, urls) {
+    const id = safeId(orderId);
+    const snap = id && await db.collection('orders').doc(id).get();
+    if (!snap || !snap.exists) fail('File not found.');
+    const order = snap.data();
+    if (!(await canReadOrder(uid, order))) fail('File not found.');
+
+    const onOrder = orderFileLinks(order);
+    const out = {}, toSign = new Map();   // object path → stored link
+    for (const url of new Set(urls)) {
+        if (!onOrder.has(url)) continue;
+        const path = pathFromUrl(url);
+        if (path) toSign.set(path, url);
+        else if (LEGACY_FILE_URL.test(url)) out[url] = url;   // old project's public bucket
+    }
+    if (toSign.size) {
+        const signed = await sb(`/object/sign/${BUCKET}`, {
+            method: 'POST', body: JSON.stringify({ expiresIn: VIEW_TTL_S, paths: [...toSign.keys()] }),
+        });
+        for (const s of signed) {
+            if (s.signedURL && toSign.has(s.path)) out[toSign.get(s.path)] = `${sbUrl()}/storage/v1${s.signedURL}`;
+        }
+    }
+    return out;
+}
+
 router.post('/view-url', async (req, res) => {
     const user = await verifyUser(req, res);
     if (!user) return;
     try {
         const { orderId, url, path: rawPath } = req.body || {};
-        let path;
-        if (rawPath) {
-            // Admin storage browser — no order context
-            if (!(await rolesOf(user.uid)).includes('admin')) fail('File not found.');
-            path = pathFromUrl(`/storage/v1/object/files/${rawPath}`);
-        } else {
-            const id = safeId(orderId);
-            const snap = url && id && await db.collection('orders').doc(id).get();
-            if (!snap || !snap.exists) fail('File not found.');
-            const order = snap.data();
-            if (!orderFileLinks(order).has(url) || !(await canReadOrder(user.uid, order))) fail('File not found.');
-            path = pathFromUrl(url);
-            if (!path && LEGACY_FILE_URL.test(url)) return res.json({ url });
+        if (!rawPath) {
+            const link = url && (await signOrderLinks(user.uid, orderId, [url]))[url];
+            if (!link) fail('File not found.');
+            return res.json({ url: link });
         }
+        // Admin storage browser — no order context
+        if (!(await rolesOf(user.uid)).includes('admin')) fail('File not found.');
+        const path = pathFromUrl(`/storage/v1/object/files/${rawPath}`);
         if (!path) fail('File not found.');
 
         const { signedURL } = await sb(`/object/sign/${BUCKET}/${encPath(path)}`,
             { method: 'POST', body: JSON.stringify({ expiresIn: VIEW_TTL_S }) });
         res.json({ url: `${sbUrl()}/storage/v1${signedURL}` });
     } catch (err) { sendError(res, err, 'files/view-url'); }
+});
+
+/* Every file link on an order page at once, so the page can put openable links
+   in place of the stored ones (which 404 now that the bucket is private). */
+router.post('/view-urls', async (req, res) => {
+    const user = await verifyUser(req, res);
+    if (!user) return;
+    try {
+        const { orderId, urls } = req.body || {};
+        if (!Array.isArray(urls) || !urls.length || urls.length > 200) fail('Choose 1–200 files.');
+        res.json({ urls: await signOrderLinks(user.uid, orderId, urls.map(String)) });
+    } catch (err) { sendError(res, err, 'files/view-urls'); }
 });
 
 /* ── Admin storage browser (admin-cloud.html) ── */
