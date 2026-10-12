@@ -79,12 +79,13 @@ async function canReadOrder(uid, order) {
     return (sd.owners || []).includes(uid) || (sd.employees || []).includes(uid);
 }
 
-/** Every file link on an order (xerox documents and custom poster photos). */
+/** Every file link on an order (xerox documents, custom poster and poster wall photos). */
 function orderFileLinks(order) {
     return new Set([
         ...(order.documents || []).map(d => d?.uploadedUrl),
         ...(order.items || []).map(i => i?.customPhoto),
         ...(order.items || []).map(i => i?.customPreview),
+        ...(order.items || []).flatMap(i => (Array.isArray(i?.wallSlots) ? i.wallSlots : []).map(s => s?.photo)),
     ].filter(Boolean));
 }
 

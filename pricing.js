@@ -14,6 +14,7 @@
 const { db } = require('./firebase');
 const { fail } = require('./authHelpers');
 const { pathFromUrl } = require('./routes/files');
+const W = require('./wallLayouts');
 
 const num = v => Number(v) || 0;
 const r2  = n => Math.round(n * 100) / 100;
@@ -90,19 +91,105 @@ function sanitizeLayout(l) {
     return { rotate: n(l.rotate, -360, 360), zoom: n(l.zoom, 0, 20), x: n(l.x, -5, 5), y: n(l.y, -5, 5), landscape: !!l.landscape };
 }
 
+/* ── Build Your Wall / Mix & Match poster pack ──────
+   Prices from poster_config/main (wall / pack, set in manage-posters.html).
+   Cart line ids:  "wall-poster__<layoutKey>__<tag>"
+                   "poster-pack__<size>-<count>__<tag>"
+   wallSlots: one entry per poster, in slot order (see wallLayouts.js):
+   { itemId } — a Wall Posters design, or { photo } — the customer's cropped
+   photo in poster-uploads/<uid>/.                                            */
+const WALL_ID = 'wall-poster';
+const PACK_ID = 'poster-pack';
+const isWallLine = baseId => baseId === WALL_ID || baseId === PACK_ID;
+
+const primaryImg = it => {
+    const imgs = Array.isArray(it.images) ? it.images : [];
+    return (imgs.find(i => i && i.isPrimary) || imgs[0] || {}).url || '';
+};
+
+function priceWallLine(line, part, cfg, designs, uid) {
+    const wall = part.baseId === WALL_ID;
+    let sizes, price, name, extra;
+    if (wall) {
+        const layout = W.LAYOUTS[part.size];
+        price = layout && W.wallPrice(cfg, part.size);
+        if (!price) fail('This wall layout is no longer available. Please remove it from your cart.');
+        sizes = W.slotSizes(layout);
+        name  = `Build Your Wall — ${layout.name} (${sizes.length} posters)`;
+        extra = { wallLayout: part.size };
+    } else {
+        const [size, n] = String(part.size).split('-');
+        const count = Math.floor(num(n));
+        price = W.packPrice(cfg, size, count);
+        if (!price) fail('This poster pack is no longer available. Please remove it from your cart.');
+        sizes = Array.from({ length: count }, () => size);
+        name  = `Poster Pack — ${count} × ${W.SIZES[size].label}`;
+        const arrangement = W.ARRANGEMENTS[line.arrangement] ? line.arrangement : 'grid';
+        extra = { packSize: size, packCount: count, arrangement };
+    }
+    const qty = Math.floor(num(line.qty));
+    if (qty < 1 || qty > 20) fail(`Invalid quantity for "${name}".`);
+
+    const slots = Array.isArray(line.wallSlots) ? line.wallSlots : [];
+    if (slots.length !== sizes.length) fail(`Please fill all ${sizes.length} poster spots of "${name}" again.`);
+    const wallSlots = slots.map((sl, i) => {
+        if (sl && sl.itemId) {
+            const d = designs.get(String(sl.itemId));
+            if (!d) fail(`The design in spot ${i + 1} of "${name}" is no longer available. Please pick another.`);
+            return { position: i, size: sizes[i], itemId: d.id, name: String(d.name || '').slice(0, 120), img: primaryImg(d) };
+        }
+        const photo = String((sl && sl.photo) || '');
+        const path  = photo.length <= 600 ? pathFromUrl(photo) : null;
+        if (!path || !path.startsWith(uid ? `poster-uploads/${uid}/` : 'poster-uploads/')) {
+            fail(`Please add the photo for spot ${i + 1} of "${name}" again.`);
+        }
+        return { position: i, size: sizes[i], photo };
+    });
+
+    const { wallSlots: _s, arrangement: _a, img, ...rest } = line;
+    return {
+        item: {
+            ...rest,
+            id: `${part.baseId}__${part.size}__${part.tag}`, baseId: part.baseId, qty, name,
+            category: 'posters', wallPoster: wall ? 'wall' : 'pack', ...extra, wallSlots,
+            // Preview thumbnail: keep small data / http images only.
+            img: typeof img === 'string' && img.length <= 40000 ? img : (wallSlots.find(s => s.img) || {}).img || '',
+            price: price.price, originalPrice: price.original, discountPercent: price.discountPercent,
+        },
+        total: price.price * qty,
+    };
+}
+
+/** Wall Posters designs referenced by wall / pack lines → Map(id → item). */
+async function loadWallDesigns(lines, parts) {
+    const ids = [...new Set(lines.flatMap((l, i) => isWallLine(parts[i].baseId) && Array.isArray(l?.wallSlots)
+        ? l.wallSlots.map(s => s && s.itemId && String(s.itemId)).filter(Boolean) : []))];
+    if (ids.length > 300) fail('Too many posters in one order.');
+    if (!ids.length) return new Map();
+    const snaps = await db.getAll(...ids.map(id => db.collection('items').doc(id)));
+    return new Map(snaps.filter(s => s.exists && s.data().category === 'posters' && !s.data().customUpload)
+        .map(s => [s.id, { id: s.id, ...s.data() }]));
+}
+
 /** Re-prices the cart lines of one shop. Lines keep their display fields; price,
     originalPrice, discountPercent and name come from items/{id}.            */
-async function priceProductGroup(lines) {
+async function priceProductGroup(lines, uid) {
     if (!Array.isArray(lines) || !lines.length || lines.length > 100) fail('Your cart is empty or too large.');
     const parts = lines.map(l => splitLineId(l?.id));
-    const isCustom = parts.map(p => p.baseId === CUSTOM_POSTER_ID);
+    const isCustom = parts.map(p => p.baseId === CUSTOM_POSTER_ID || isWallLine(p.baseId));
     const regular  = parts.filter((_, i) => !isCustom[i]);
     const regSnaps = regular.length ? await db.getAll(...regular.map(p => db.collection('items').doc(p.baseId))) : [];
     const posterCfg = isCustom.includes(true) ? await loadPosterConfig() : null;
+    const designs   = await loadWallDesigns(lines, parts);
     let k = 0;
     const snaps = isCustom.map(c => c ? null : regSnaps[k++]);
     let subtotal = 0;
     const items = lines.map((line, i) => {
+        if (isWallLine(parts[i].baseId)) {
+            const { item, total } = priceWallLine(line, parts[i], posterCfg, designs, uid);
+            subtotal += total;
+            return item;
+        }
         if (isCustom[i]) {
             const { item, total } = priceCustomPosterLine(line, parts[i], posterCfg);
             subtotal += total;

@@ -63,7 +63,7 @@ router.post('/quote', async (req, res) => {
             if (isXerox) {
                 ({ documents: lines, subtotal } = P.priceXeroxDocuments(g.documents, P.shopXeroxConfig(shop, xeroxGlobal)));
             } else {
-                ({ items: lines, subtotal } = await P.priceProductGroup(g.items));
+                ({ items: lines, subtotal } = await P.priceProductGroup(g.items, user.uid));
             }
             const rules = shop?.deliveryPrices?.[isXerox ? 'xerox' : 'others'];
             out.push({
